@@ -247,6 +247,179 @@ LogicalResult addOperation(GeneratorInfo &info) {
   return success();
 }
 
+/// Get the types that the constraint can support.
+bool testType(irdl::TypeConstraint *constraint,
+        ArrayRef<std::unique_ptr<irdl::TypeConstraint>> varConstraints,
+        MutableArrayRef<Type> vars, mlir::Type type) {
+    return constraint->verifyType({}, type, varConstraints, vars).succeeded();
+}
+
+bool isValidReturnType(GeneratorInfo& info, irdl::OperationOp op, mlir::Type type){
+    auto builder = info.builder;
+    auto ctx = builder.getContext();
+
+    auto constraintOp=op.getOp<irdl::ConstraintVarsOp>();
+    auto operandDefs = op.getOp<OperandsOp>();
+    auto resultDefs = op.getOp<ResultsOp>();
+
+    SmallVector<std::pair<StringRef, std::unique_ptr<irdl::TypeConstraint>>>
+    namedConstraintVars = {};
+    SmallVector<std::unique_ptr<irdl::TypeConstraint>> varConstraints;
+    SmallVector<Type> vars;
+
+
+    // For each constraint variable, we assign a type.
+    if (constraintOp) {
+        for (auto namedConstraintAttr: constraintOp->getParams()) {
+            auto namedConstraint =
+                    namedConstraintAttr.cast<NamedTypeConstraintAttr>();
+            auto constraint =
+                    namedConstraint.getConstraint()
+                            .cast<TypeConstraintAttrInterface>()
+                            .getTypeConstraint(info.irdlContext, namedConstraintVars);
+            // TODO(fehr) Currently a hack, will be fixed later once I update
+            // the IRDL API.
+            auto constraint2 =
+                    namedConstraint.getConstraint()
+                            .cast<TypeConstraintAttrInterface>()
+                            .getTypeConstraint(info.irdlContext, namedConstraintVars);
+
+            auto satisfyingTypes =
+                    getSatisfyingTypes(*ctx, constraint.get(), varConstraints, vars);
+            assert(satisfyingTypes.size()!=0 && "constraints");
+            namedConstraintVars.emplace_back(namedConstraint.getName(),
+                                             std::move(constraint));
+            varConstraints.emplace_back(std::move(constraint2));
+            if(auto it=std::find(satisfyingTypes.begin(),satisfyingTypes.end(),type);it!=satisfyingTypes.end()){
+                vars.push_back(type);
+            }else{
+                vars.push_back(satisfyingTypes[info.chooser->choose(satisfyingTypes.size())]);
+            }
+        }
+    }
+
+    SmallVector <Type> resultTypes = {};
+    if (resultDefs) {
+        for (auto resultAttr: resultDefs->getParams()) {
+            auto resultConstr = resultAttr.cast<NamedTypeConstraintAttr>();
+            auto constraint =
+                    resultConstr.getConstraint()
+                            .cast<TypeConstraintAttrInterface>()
+                            .getTypeConstraint(info.irdlContext, namedConstraintVars);
+            llvm::errs()<<"Check result: ";
+            llvm::errs()<<constraint.get()->verifyType({},type,varConstraints, vars).succeeded()<<"\n";
+            //                    getSatisfyingTypes(info.irdlContext, resultConstr, varConstraints,
+//                                       vars, namedConstraintVars);
+            //assert(satisfyingTypes.size()!=0 && "result");
+            //auto type = satisfyingTypes[info.chooser->choose(satisfyingTypes.size())];
+            //resultTypes.push_back(type);
+        }
+    }
+
+    SmallVector <Value> operands = {};
+    if (operandDefs) {
+        for (auto operandAttr: operandDefs->getParams()) {
+            auto operandConstr = operandAttr.cast<NamedTypeConstraintAttr>();
+            auto satisfyingTypes =
+                    getSatisfyingTypes(info.irdlContext, operandConstr, varConstraints,
+                                       vars, namedConstraintVars);
+            assert(satisfyingTypes.size()!=0 && "ops");
+            auto type = satisfyingTypes[info.chooser->choose(satisfyingTypes.size())];
+            operands.push_back(getValue(info, type));
+        }
+    }
+
+    return false;
+}
+
+void checkIRDL(GeneratorInfo& info){
+    auto builder = info.builder;
+    auto ctx = builder.getContext();
+    mlir::Type testType=builder.getF32Type();
+
+    for(irdl::OperationOp op:info.availableOps) {
+        llvm::errs()<<"op name: "<<op.getNameAttr()<<"\n";
+        isValidReturnType(info,op,testType);
+        // The constraint variables, and their assignment.
+        SmallVector<std::pair<StringRef, std::unique_ptr<irdl::TypeConstraint>>>
+        namedConstraintVars = {};
+        SmallVector<std::unique_ptr<irdl::TypeConstraint>> varConstraints;
+        SmallVector<Type> vars;
+
+        // For each constraint variable, we assign a type.
+        auto constraintOp = op.getOp<ConstraintVarsOp>();
+        if (constraintOp) {
+            for (auto namedConstraintAttr: constraintOp->getParams()) {
+                auto namedConstraint =
+                        namedConstraintAttr.cast<NamedTypeConstraintAttr>();
+                auto constraint =
+                        namedConstraint.getConstraint()
+                                .cast<TypeConstraintAttrInterface>()
+                                .getTypeConstraint(info.irdlContext, namedConstraintVars);
+                // TODO(fehr) Currently a hack, will be fixed later once I update
+                // the IRDL API.
+                auto constraint2 =
+                        namedConstraint.getConstraint()
+                                .cast<TypeConstraintAttrInterface>()
+                                .getTypeConstraint(info.irdlContext, namedConstraintVars);
+
+                auto satisfyingTypes =
+                        getSatisfyingTypes(*ctx, constraint.get(), varConstraints, vars);
+                assert(satisfyingTypes.size()!=0 && "constraints");
+                /*llvm::errs()<<"constraints\n";
+                for(mlir::Type ty:satisfyingTypes){
+                    ty.dump();
+                    llvm::errs()<<"\n";
+                }*/
+                auto type = satisfyingTypes[info.chooser->choose(satisfyingTypes.size())];
+
+                namedConstraintVars.emplace_back(namedConstraint.getName(),
+                                                 std::move(constraint));
+                varConstraints.emplace_back(std::move(constraint2));
+                vars.push_back(type);
+            }
+        }
+
+        auto operandDefs = op.getOp<OperandsOp>();
+        SmallVector <Value> operands = {};
+        if (operandDefs) {
+            for (auto operandAttr: operandDefs->getParams()) {
+                auto operandConstr = operandAttr.cast<NamedTypeConstraintAttr>();
+                auto satisfyingTypes =
+                        getSatisfyingTypes(info.irdlContext, operandConstr, varConstraints,
+                                           vars, namedConstraintVars);
+                assert(satisfyingTypes.size()!=0 && "ops");
+                auto type = satisfyingTypes[info.chooser->choose(satisfyingTypes.size())];
+                operands.push_back(getValue(info, type));
+                /*llvm::errs()<<"ops\n";
+                for(mlir::Type ty:satisfyingTypes){
+                    ty.dump();
+                    llvm::errs()<<"\n";
+                }*/
+            }
+        }
+
+        auto resultDefs = op.getOp<ResultsOp>();
+        SmallVector <Type> resultTypes = {};
+        if (resultDefs) {
+            for (auto resultAttr: resultDefs->getParams()) {
+                auto resultConstr = resultAttr.cast<NamedTypeConstraintAttr>();
+                auto satisfyingTypes =
+                        getSatisfyingTypes(info.irdlContext, resultConstr, varConstraints,
+                                           vars, namedConstraintVars);
+                assert(satisfyingTypes.size()!=0 && "result");
+                auto type = satisfyingTypes[info.chooser->choose(satisfyingTypes.size())];
+                resultTypes.push_back(type);
+                /*llvm::errs()<<"results\n";
+                for(mlir::Type ty:satisfyingTypes){
+                    ty.dump();
+                    llvm::errs()<<"\n";
+                }*/
+            }
+        }
+    }
+}
+
 /// Create a random program, given the decisions taken from chooser.
 /// The program has at most `fuel` operations.
 OwningOpRef<ModuleOp> createProgram(MLIRContext &ctx,
@@ -271,6 +444,8 @@ OwningOpRef<ModuleOp> createProgram(MLIRContext &ctx,
 
   // Create the generator info
   GeneratorInfo info(chooser, availableOps, builder, irdlCtx);
+
+  checkIRDL(info);
 
   // Select how many operations we want to generate, and generate them.
   auto numOps = chooser->choose(fuel + 1);
@@ -306,6 +481,41 @@ parseIRDLDialects(MLIRContext &ctx, StringRef inputFilename) {
   // Parse the input file and reset the context threading state.
   OwningOpRef<ModuleOp> module(parseSourceFile<ModuleOp>(sourceMgr, &ctx));
   ctx.enableMultithreading(wasThreadingEnabled);
+
+  llvm::errs()<<"output begin\n";
+  for(irdl::DialectOp dialectOp:module->getOps<irdl::DialectOp>()){
+      for(irdl::OperationOp op:dialectOp.getOps<irdl::OperationOp>()){
+          llvm::errs()<<"op name: "<<op.getNameAttr()<<"\n";
+
+          auto constraintOp = op.getOp<ConstraintVarsOp>();
+          if (constraintOp) {
+              for (auto namedConstraintAttr : constraintOp->getParams()) {
+                  auto namedConstraint =
+                          namedConstraintAttr.cast<NamedTypeConstraintAttr>();
+                  namedConstraint.dump();
+                  llvm::errs()<<"\n";
+              }
+          }
+
+          auto operandDefs = op.getOp<OperandsOp>();
+          if (operandDefs) {
+              for (auto operandAttr : operandDefs->getParams()) {
+                  auto operandConstr = operandAttr.cast<NamedTypeConstraintAttr>();
+                  operandConstr.dump();
+                  llvm::errs()<<"\n";
+              }
+          }
+
+          auto resultDefs = op.getOp<ResultsOp>();
+          if (resultDefs) {
+              for (auto resultAttr : resultDefs->getParams()) {
+                  auto resultConstr = resultAttr.cast<NamedTypeConstraintAttr>();
+                  resultConstr.dump();
+                  llvm::errs()<<"\n";
+              }
+          }
+      }
+  }
 
   return module;
 }
@@ -375,7 +585,7 @@ int main(int argc, char **argv) {
 
   // Get the dialects.
   auto &dialects = optDialects.value();
-  dialects->dump();
+  //dialects->dump();
 
   // Get the list of operations we support.
   std::vector<OperationOp> availableOps = {};
